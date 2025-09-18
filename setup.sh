@@ -1,9 +1,11 @@
-pip install ultralytics==8.0.144
+pip install ultralytics
 pip install pybboxes
 pip install opencv-python
-conda install opencv=4.6.0
+conda install opencv=4.9.0.80
 pip uninstall numpy
-pip install numpy==1.25.1
+pip install numpy==1.26.4
+pip install natsorted
+pip install rich
 pip install gdown
 mkdir model
 echo "Downloading the YOLO model..."
