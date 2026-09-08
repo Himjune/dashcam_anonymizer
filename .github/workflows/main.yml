@@ -20,20 +20,23 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          pip install ultralytics opencv-python pybboxes natsort rich pyyaml
+          # dill: веса best.pt сериализованы с ним; внутри exe ultralytics
+          # не сможет доставить его через pip, поэтому ставим заранее
+          pip install ultralytics opencv-python pybboxes natsort rich pyyaml dill
           pip install pyinstaller
 
       - name: Build exe
         run: |
           # --copy-metadata падает, если пакета нет (например, свежие ultralytics
           # больше не тянут tqdm), поэтому берём только реально установленные
-          $candidates = @('ultralytics','torch','torchvision','numpy','tqdm','psutil','requests','pyyaml','opencv-python')
+          $candidates = @('ultralytics','torch','torchvision','numpy','tqdm','psutil','requests','pyyaml','opencv-python','dill')
           $meta = $candidates |
             Where-Object { pip show $_ 2>$null } |
             ForEach-Object { "--copy-metadata=$_" }
           Write-Host "copy-metadata for: $($meta -join ' ')"
           pyinstaller --noconfirm --console --onedir --name dashcam_blur `
             --collect-all ultralytics `
+            --hidden-import dill `
             @meta `
             blur_videos.py
 
