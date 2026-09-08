@@ -1,0 +1,75 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:        # запуск вручную кнопкой в GitHub
+  push:
+    tags: ['v*']            # ...или автоматически по тегу v1.0 и т.п.
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies (CPU-only torch)
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install ultralytics opencv-python pybboxes natsort rich pyyaml
+          pip install pyinstaller
+
+      - name: Build exe
+        run: |
+          pyinstaller --noconfirm --console --onedir --name dashcam_blur `
+            --collect-all ultralytics `
+            --copy-metadata ultralytics `
+            --copy-metadata torch `
+            --copy-metadata numpy `
+            --copy-metadata tqdm `
+            blur_videos.py
+
+      - name: Add configs and working folders
+        run: |
+          Copy-Item -Recurse configs dist/dashcam_blur/configs
+          New-Item -ItemType Directory -Force dist/dashcam_blur/model
+          New-Item -ItemType Directory -Force dist/dashcam_blur/videos
+          New-Item -ItemType Directory -Force dist/dashcam_blur/blurred_videos
+
+      - name: Bundle ffmpeg (for keeping the audio track)
+        continue-on-error: true
+        run: |
+          curl -L -o ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_tmp
+          $exe = (Get-ChildItem ffmpeg_tmp -Recurse -Filter ffmpeg.exe | Select-Object -First 1).FullName
+          Copy-Item $exe dist/dashcam_blur/
+
+      - name: Add run.bat and readme
+        run: |
+          $bat = @(
+            '@echo off',
+            'cd /d "%~dp0"',
+            'dashcam_blur.exe --config configs\vid_blur.yaml',
+            'pause'
+          )
+          Set-Content -Encoding ascii -Path dist/dashcam_blur/run.bat -Value $bat
+          $readme = @(
+            'Dashcam anonymizer',
+            '',
+            '1. Put the YOLO weights into  model\best.pt',
+            '2. Put the videos to process into  videos\',
+            '3. Double-click run.bat',
+            '4. Results appear in  blurred_videos\',
+            '',
+            'Settings (blur strength, confidence threshold): configs\vid_blur.yaml'
+          )
+          Set-Content -Encoding utf8 -Path dist/dashcam_blur/README.txt -Value $readme
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dashcam_blur-windows
+          path: dist/dashcam_blur
