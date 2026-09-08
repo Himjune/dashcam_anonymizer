@@ -1,6 +1,13 @@
 import os
 import glob
 import json
+import subprocess
+import multiprocessing
+
+# FIX: required when frozen with PyInstaller on Windows — without it every
+# worker process would re-run the whole script (endless restart loop).
+multiprocessing.freeze_support()
+
 import cv2
 import pybboxes as pbx
 import yaml
@@ -30,6 +37,12 @@ console.print("Loading YOLO Model...", style="bold green")
 model = YOLO(config["model_path"])
 
 if(config["generate_detections"]):
+    # FIX: remove stale detection folders, otherwise ultralytics writes to
+    # runs/detect/yolo_videos_pred2, pred3, ... and the script below finds nothing
+    if os.path.exists("runs/"):
+        shutil.rmtree("runs/")
+    if os.path.exists("annot_jsons/"):
+        shutil.rmtree("annot_jsons/")
     console.print("Generating YOLO Detections for the Videos", style="bold green")
     # Note: The YOLO model() call is generally capable of finding all supported video formats in a directory.
     # No changes are needed here.
@@ -40,16 +53,20 @@ if(config["generate_detections"]):
                 save_txt=True,
                 conf=config['detection_conf_thresh'],
                 device='cuda:0',
-                project='runs/detect/',
+                # FIX: absolute path — in ultralytics >=8.1 a relative project is
+                # resolved against the global SETTINGS['runs_dir'], not the cwd
+                project=os.path.abspath('runs/detect'),
                 name="yolo_videos_pred")
     else:
-        console.print("GPU Not Available, Running on CPU", style="bold orange")
+        console.print("GPU Not Available, Running on CPU")
         _ = model(source=config['videos_path'],
                 save=False,
                 save_txt=True,
                 conf=config['detection_conf_thresh'],
                 device='cpu',
-                project='runs/detect/',
+                # FIX: absolute path — in ultralytics >=8.1 a relative project is
+                # resolved against the global SETTINGS['runs_dir'], not the cwd
+                project=os.path.abspath('runs/detect'),
                 name="yolo_videos_pred")
     
 # =========================================================================================
@@ -78,13 +95,18 @@ if(config["generate_jsons"]):
         vid.release() # Release the video capture object after getting dimensions
         
         data_dict = {}
-        # The yolo prediction folder name matches the video name without extension
-        annot_dir = natsorted(glob.glob(f'runs/detect/yolo_videos_pred/labels/{vid_name}_*.txt'))
-        
+        # FIX: use the newest yolo_videos_pred* folder (ultralytics may append 2, 3, ...)
+        pred_dirs = natsorted(glob.glob('runs/detect/yolo_videos_pred*'))
+        labels_dir = osj(pred_dirs[-1], 'labels') if pred_dirs else ''
+        annot_dir = natsorted(glob.glob(osj(labels_dir, f'{vid_name}_*.txt'))) if labels_dir else []
+
         try:
             for file in annot_dir:
                 if (os.path.basename(file).endswith('.txt')):
-                    frame_num = int(os.path.basename(file).replace(".txt","").split("_")[1])
+                    # FIX: take the LAST underscore-separated part as the frame number.
+                    # split("_")[1] broke on video names containing "_" (e.g. IMG_5808_42.txt
+                    # returned 5808 for every frame, collapsing all labels into one frame).
+                    frame_num = int(os.path.basename(file).replace(".txt","").rsplit("_", 1)[1])
                     with open(file, 'r') as fin:
                         for line in fin.readlines():
                             line = [float(item) for item in line.split()[1:]]
@@ -96,6 +118,10 @@ if(config["generate_jsons"]):
                 os.mkdir("annot_jsons")
             with open("annot_jsons/"+str(vid_name)+".json", 'w') as f:
                 json.dump(data_dict, f)
+            if not data_dict:
+                console.print(f"WARNING: no detections found for {vid_name} — output will NOT be blurred!", style="bold red")
+            else:
+                console.print(f"{vid_name}: detections on {len(data_dict)} frames", style="green")
         except Exception as e:
             print(f'Could not process annotations for {video}. Error: {e}')
 
@@ -106,6 +132,9 @@ def blur_regions(image, regions):
     """
     for region in regions:
         x1,y1,x2,y2 = region
+        # FIX: expand the box by 15% so the blur covers the object edges
+        mx, my = 0.15 * (x2 - x1), 0.15 * (y2 - y1)
+        x1, y1, x2, y2 = x1 - mx, y1 - my, x2 + mx, y2 + my
         x1, y1, x2, y2 = round(x1), round(y1), round(x2), round(y2)
         # Ensure coordinates are within image bounds
         y1, y2 = max(0, y1), min(image.shape[0], y2)
@@ -137,6 +166,17 @@ for video in track(videos):
         with open(json_path) as F:
             data = json.load(F)
 
+            # FIX: temporal padding — the detector occasionally skips single frames,
+            # so apply every detection to +-temporal_pad_frames neighbouring frames too
+            pad = int(config.get("temporal_pad_frames", 5))
+            if pad > 0:
+                padded = {}
+                for k, regions in data.items():
+                    fnum = int(k)
+                    for nf in range(fnum - pad, fnum + pad + 1):
+                        padded.setdefault(str(nf), []).extend(regions)
+                data = padded
+
             video_capture = cv2.VideoCapture(video)
             
             # =========================================================================================
@@ -152,6 +192,9 @@ for video in track(videos):
             fps = round(video_capture.get(cv2.CAP_PROP_FPS))
             # 'avc1' is a good choice for H.264 codec in an .mp4 container.
             output_video = cv2.VideoWriter(out_vid_path, cv2.VideoWriter_fourcc(*'avc1'), fps, frame_size)
+            if not output_video.isOpened():
+                # FIX: fall back to mp4v if the avc1 encoder is unavailable in this OpenCV build
+                output_video = cv2.VideoWriter(out_vid_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, frame_size)
             count = 1
             while True:
                 ret, frame = video_capture.read()
@@ -166,6 +209,20 @@ for video in track(videos):
                 count+=1
             video_capture.release()
             output_video.release()
+            # FIX: copy the audio track from the original (OpenCV drops it)
+            ffmpeg = shutil.which("ffmpeg")
+            if ffmpeg:
+                tmp_path = out_vid_path + ".tmp.mp4"
+                r = subprocess.run([ffmpeg, "-y", "-loglevel", "error",
+                                    "-i", out_vid_path, "-i", video,
+                                    "-map", "0:v", "-map", "1:a?",
+                                    "-c:v", "copy", "-c:a", "copy", "-shortest", tmp_path])
+                if r.returncode == 0:
+                    os.replace(tmp_path, out_vid_path)
+                elif os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            else:
+                console.print("ffmpeg not found — output saved without audio", style="yellow")
         print(f"Processed Video {vid_name}")
     else:
         console.print(f"No objects detected in file {video}, copying file as is.", style="bold orange")

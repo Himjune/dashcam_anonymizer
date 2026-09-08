@@ -1,8 +1,9 @@
 model_path: 'model/best.pt'
 videos_path: 'videos/'
-detection_conf_thresh: 0.1
-gpu_avail: True #True #False
+detection_conf_thresh: 0.01 #low on purpose: for anonymization a false blur is safer than a missed plate/face
+gpu_avail: False #True #False
 generate_detections: True #False if the YOLO annotations already present (saves compute!)
 generate_jsons: True
-blur_radius: 31 #increase to increase blur intensity (odd values)
+blur_radius: 63 #increase to increase blur intensity (odd values)
+temporal_pad_frames: 5 #apply each detection to +-N neighbouring frames (covers detector gaps)
 output_folder: blurred_videos
