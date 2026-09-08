@@ -25,12 +25,16 @@ jobs:
 
       - name: Build exe
         run: |
+          # --copy-metadata падает, если пакета нет (например, свежие ultralytics
+          # больше не тянут tqdm), поэтому берём только реально установленные
+          $candidates = @('ultralytics','torch','torchvision','numpy','tqdm','psutil','requests','pyyaml','opencv-python')
+          $meta = $candidates |
+            Where-Object { pip show $_ 2>$null } |
+            ForEach-Object { "--copy-metadata=$_" }
+          Write-Host "copy-metadata for: $($meta -join ' ')"
           pyinstaller --noconfirm --console --onedir --name dashcam_blur `
             --collect-all ultralytics `
-            --copy-metadata ultralytics `
-            --copy-metadata torch `
-            --copy-metadata numpy `
-            --copy-metadata tqdm `
+            @meta `
             blur_videos.py
 
       - name: Add configs and working folders
